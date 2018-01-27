@@ -3,42 +3,56 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"log"
+	"strings"
 
 	_ "github.com/lib/pq"
 )
 
+var dbuser string
+var dbname string
+
+var init_int_tables = []string{"int_table0", "int_table2", "int_table4"}
+var all_int_tables = []string{"int_table0", "int_table2", "int_table4", "int_table1", "int_table6"}
+
+func tabnameToInt(s string) int {
+	var id int
+	fmt.Sscanf(s, "int_table%d", &id)
+	return id
+}
+
 func initDatabase(db *sql.DB) {
-	_, err := db.Exec("create table if not exists int_table (id int primary key)")
-	if err != nil {
-		log.Fatal(err)
+	for _, t := range all_int_tables {
+		db.Exec(fmt.Sprintf("drop table %v", t))
 	}
-	_, err = db.Exec("delete from int_table")
-	if err != nil {
-		log.Fatal(err)
+
+	for _, t := range init_int_tables {
+		_, err := db.Exec(fmt.Sprintf("create table %v (id int primary key)", t))
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
-	_, err = db.Exec("insert into int_table(id) values (0)")
-	if err != nil {
-		log.Fatal(err)
-	}
-	_, err = db.Exec("insert into int_table(id) values (2)")
-	if err != nil {
-		log.Fatal(err)
-	}
-	_, err = db.Exec("insert into int_table(id) values (4)")
+
+	_, err := db.Exec("create table if not exists sum (name varchar primary key, count int)")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	_, err = db.Exec("create table if not exists sum (name varchar primary key, count int)")
-	if err != nil {
-		log.Fatal(err)
-	}
 	_, err = db.Exec("delete from sum")
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func openDatabase() *sql.DB {
+	connStr := fmt.Sprintf("user=%s dbname=%s sslmode=disable", dbuser, dbname)
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return db
 }
 
 var opts = &sql.TxOptions{}
@@ -48,16 +62,8 @@ func init() {
 }
 
 func runTxnBbeforeA() {
-	connStr := "user=mzh dbname=write_skew_test sslmode=disable"
-	db, err := sql.Open("postgres", connStr)
-	if err != nil {
-		log.Fatal(err)
-	}
+	db := openDatabase()
 	defer db.Close()
-
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	initDatabase(db)
 
@@ -79,16 +85,8 @@ func runTxnBbeforeA() {
 }
 
 func runTxnAbeforeB() {
-	connStr := "user=mzh dbname=write_skew_test sslmode=disable"
-	db, err := sql.Open("postgres", connStr)
-	if err != nil {
-		log.Fatal(err)
-	}
+	db := openDatabase()
 	defer db.Close()
-
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	initDatabase(db)
 
@@ -110,16 +108,8 @@ func runTxnAbeforeB() {
 }
 
 func runTxnConcurrent() {
-	connStr := "user=mzh dbname=write_skew_test sslmode=disable"
-	db, err := sql.Open("postgres", connStr)
-	if err != nil {
-		log.Fatal(err)
-	}
+	db := openDatabase()
 	defer db.Close()
-
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	initDatabase(db)
 
@@ -141,6 +131,12 @@ func runTxnConcurrent() {
 }
 
 func main() {
+	log.SetFlags(log.Lshortfile | log.LstdFlags)
+
+	flag.StringVar(&dbuser, "user", "mzh", "postgresql user")
+	flag.StringVar(&dbname, "db", "write_skew_test", "postgresql database name")
+	flag.Parse()
+
 	runTxnAbeforeB()
 	runTxnBbeforeA()
 	runTxnConcurrent()
@@ -148,18 +144,13 @@ func main() {
 
 func printData(db *sql.DB) {
 	log.Printf("=========================================")
-	rows, err := db.Query("select * from int_table")
-	if err != nil {
-		log.Fatal(err)
+	for _, t := range all_int_tables {
+		_, err := db.Query(fmt.Sprintf("select * from %s", t))
+		if err != nil {
+			continue
+		}
+		log.Printf("%s", t)
 	}
-
-	for rows.Next() {
-		var id int
-		rows.Scan(&id)
-		log.Printf("id: %d", id)
-	}
-
-	rows.Close()
 
 	rows2, err := db.Query("select * from sum")
 	if err != nil {
@@ -177,10 +168,20 @@ func printData(db *sql.DB) {
 	rows2.Close()
 }
 
-func iterate(rows *sql.Rows) (evens, odds int) {
+func iterate(tx *sql.Tx) (evens, odds int) {
+	log.Printf("=========================================")
+	rows, err := tx.Query("select tablename from pg_catalog.pg_tables")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
 	for rows.Next() {
-		var id int
-		rows.Scan(&id)
+		var t string
+		rows.Scan(&t)
+		if !strings.HasPrefix(t, "int_table") {
+			continue
+		}
+		id := tabnameToInt(t)
 		if id%2 == 0 {
 			evens += 1
 		} else {
@@ -191,19 +192,13 @@ func iterate(rows *sql.Rows) (evens, odds int) {
 }
 
 func runTxnA(tx *sql.Tx) {
-	_, err := tx.Exec("insert into int_table(id) values (1)")
+	_, err := tx.Exec("create table int_table1 (id int primary key)")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	rows, err := tx.Query("select * from int_table")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	evens, _ := iterate(rows)
-	// log.Printf("%d evens, %d odds in database", evens, odds)
-	rows.Close()
+	evens, odds := iterate(tx)
+	log.Printf("%d evens, %d odds in database", evens, odds)
 
 	_, err = tx.Exec(fmt.Sprintf("insert into sum (name, count) values ('%s', '%d')", "_evens", evens))
 	if err != nil {
@@ -212,19 +207,13 @@ func runTxnA(tx *sql.Tx) {
 }
 
 func runTxnB(tx *sql.Tx) {
-	_, err := tx.Exec("insert into int_table(id) values (6)")
+	_, err := tx.Exec("create table int_table6 (id int primary key)")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	rows, err := tx.Query("select * from int_table")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	_, odds := iterate(rows)
+	_, odds := iterate(tx)
 	// log.Printf("%d evens, %d odds in database", evens, odds)
-	rows.Close()
 
 	_, err = tx.Exec(fmt.Sprintf("insert into sum (name, count) values ('%s', '%d')", "_odds", odds))
 	if err != nil {
