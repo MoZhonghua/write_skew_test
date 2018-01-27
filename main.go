@@ -37,5 +37,6 @@ var opts = &sql.TxOptions{}
 
 func init() {
 	opts.Isolation = sql.LevelSerializable
+	// opts.Isolation = sql.LevelReadCommitted
 }
 
