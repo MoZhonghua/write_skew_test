@@ -20,8 +20,8 @@ func main() {
 	flag.Parse()
 
 	tableCountTest()
-	log.Printf("-------------------------------------------------")
-	// rowCountTest()
+	log.Printf("--------------row count test ----------------")
+	rowCountTest()
 }
 
 func openDatabase() *sql.DB {
